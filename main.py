@@ -8,11 +8,14 @@ import resend
 app = FastAPI()
 
 # 👇 CHANGE THIS TO YOUR WORDPRESS DOMAIN
-ALLOWED_ORIGIN = "https://sales101.org/fraud-advisory"
+ALLOWED_ORIGINS = [
+    "https://sales101.org",
+    "https://www.sales101.org"
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[ALLOWED_ORIGIN],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
