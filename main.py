@@ -25,15 +25,23 @@ app.add_middleware(
 
 ANALYST_EMAIL = "bostoncopier@gmail.com"
 
-# Use env vars set in Render (DO NOT hardcode keys in code)
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-resend.api_key = os.environ.get("RESEND_API_KEY")
+# Environment variables (set these in Render)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+
+# Initialize clients
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+resend.api_key = RESEND_API_KEY
 
 
 # ✅ SMOKE TEST ENDPOINT
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {
+        "ok": True,
+        "openai_configured": bool(OPENAI_API_KEY),
+        "resend_configured": bool(RESEND_API_KEY),
+    }
 
 
 @app.post("/api/submit")
@@ -46,7 +54,7 @@ async def submit(
     try:
         submission_id = str(uuid.uuid4())
 
-        # Combine some text from uploaded files
+        # Combine some text from uploaded files (best-effort)
         combined_text = ""
         for f in files:
             content = await f.read()
@@ -73,21 +81,39 @@ Provide:
 - Recommendation
 """
 
-        # AI analysis
-        try:
-            response = client.responses.create(
-                model="gpt-4.1-mini",
-                input=prompt,
-            )
-            ai_text = response.output_text
-        except Exception as e:
-            ai_text = f"AI analysis failed: {str(e)}"
+        # -------------------------
+        # AI analysis (optional)
+        # -------------------------
+        ai_text = ""
+        ai_error = None
 
+        if not client:
+            ai_text = "AI analysis not run: OPENAI_API_KEY is not configured."
+            ai_error = "OPENAI_API_KEY missing"
+        else:
+            try:
+                response = client.responses.create(
+                    model="gpt-4.1-mini",
+                    input=prompt,
+                )
+                ai_text = response.output_text
+            except Exception as e:
+                ai_text = f"AI analysis failed: {str(e)}"
+                ai_error = str(e)
+
+        # -------------------------
         # Email analyst
-        try:
-            if resend.api_key:
+        # -------------------------
+        email_sent = False
+        email_error = None
+
+        if not RESEND_API_KEY:
+            email_error = "RESEND_API_KEY missing"
+        else:
+            try:
                 resend.Emails.send(
                     {
+                        # Works immediately in Resend without domain verification
                         "from": "Fraud Review <onboarding@resend.dev>",
                         "to": [ANALYST_EMAIL],
                         "subject": f"Fraud Review Submission {submission_id}",
@@ -102,17 +128,22 @@ Provide:
                         """,
                     }
                 )
-        except Exception as e:
-            print("Email send error:", e)
+                email_sent = True
+            except Exception as e:
+                email_error = str(e)
+                print("Email send error:", e)
 
         return {
             "ok": True,
             "submission_id": submission_id,
             "message": "Submitted successfully.",
+            "email_sent": email_sent,
+            "email_error": email_error,
+            "ai_error": ai_error,
         }
 
     except Exception as e:
-        # This prevents "NetworkError" and shows real error
+        # This prevents "NetworkError" mystery failures and returns a real error
         return JSONResponse(
             status_code=500,
             content={"ok": False, "error": str(e)},
