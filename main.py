@@ -34,11 +34,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Send submissions to BOTH recipients
-ANALYST_EMAILS = [
-    "bostoncopier@gmail.com",
-    "Larry@stirmgroup.com",
-]
+# ✅ Send submissions to ONE recipient (demo-safe)
+ANALYST_EMAIL = "bostoncopier@gmail.com"
 
 # Environment variables (set in Render -> Environment)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -223,7 +220,7 @@ Return exactly:
                 resend.Emails.send(
                     {
                         "from": "Fraud Review <onboarding@resend.dev>",
-                        "to": ANALYST_EMAILS,  # ✅ BOTH recipients
+                        "to": [ANALYST_EMAIL],  # ✅ only bostoncopier@gmail.com
                         "subject": f"Fraud Review Submission {submission_id}",
                         "html": f"""
                             <h2>Fraud Review Submission</h2>
@@ -245,7 +242,7 @@ Return exactly:
                 email_error = str(e)
                 print("Email send error:", e)
 
-        # ✅ This is what your HTML will display as the “thank you”
+        # ✅ This is what your HTML/JS can show as the “thank you”
         return {
             "ok": True,
             "submission_id": submission_id,
