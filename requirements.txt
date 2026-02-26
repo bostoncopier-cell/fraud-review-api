@@ -1,5 +1,6 @@
-fastapi==0.110.0
-uvicorn[standard]==0.27.1
-openai==1.61.0
-resend==0.6.0
-python-multipart==0.0.9
+fastapi
+uvicorn
+python-multipart
+openai
+resend
+pypdf
