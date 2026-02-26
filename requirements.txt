@@ -1,7 +1,5 @@
 fastapi==0.110.0
-starlette==0.36.3
-pydantic==2.6.4
-uvicorn==0.27.1
+uvicorn[standard]==0.27.1
+openai==1.61.0
+resend==0.6.0
 python-multipart==0.0.9
-openai>=1.0.0
-resend>=0.6.0
