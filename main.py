@@ -103,11 +103,15 @@ async def submit(
     transaction_type: str = Form(...),
     contact_email: str = Form(...),
     short_description: str = Form(""),
+    client_name: str = Form(""),  # ✅ NEW: optional client/person name from your HTML
     # IMPORTANT: this exact annotation is what makes Swagger show "Choose Files"
     files: List[UploadFile] = File(...),
 ):
     try:
         submission_id = str(uuid.uuid4())
+
+        # ✅ NEW: normalize for display (avoid blank line noise)
+        client_name_clean = (client_name or "").strip()
 
         # Read all uploaded bytes (and keep them for attachments)
         raw_files: List[Tuple[str, bytes, str]] = []  # (filename, bytes, content_type)
@@ -164,6 +168,7 @@ async def submit(
                 prompt = f"""
 You are a fraud risk analyst. Assess the submitted transaction communication for fraud risk.
 
+Client / Person Name: {client_name_clean if client_name_clean else "(not provided)"}  # ✅ NEW
 Transaction Type: {transaction_type}
 Description: {short_description}
 User Contact Email: {contact_email}
@@ -217,6 +222,7 @@ Return exactly:
                         "html": f"""
                             <h2>Fraud Review Submission</h2>
                             <p><b>Submission ID:</b> {submission_id}</p>
+                            <p><b>Client / Person Name:</b> {client_name_clean if client_name_clean else "(not provided)"}</p> <!-- ✅ NEW -->
                             <p><b>Transaction Type:</b> {transaction_type}</p>
                             <p><b>User Contact Email:</b> {contact_email}</p>
                             <p><b>Description:</b> {short_description}</p>
@@ -240,6 +246,7 @@ Return exactly:
             "email_error": email_error,
             "ai_error": ai_error,
             "files_received": [fn for fn, _, _ in raw_files],
+            "client_name": client_name_clean,  # ✅ NEW (handy for debugging)
         }
 
     except Exception as e:
