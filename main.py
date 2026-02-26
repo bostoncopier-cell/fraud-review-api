@@ -34,7 +34,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ANALYST_EMAIL = "bostoncopier@gmail.com"
+# ✅ Send submissions to BOTH recipients
+ANALYST_EMAILS = [
+    "bostoncopier@gmail.com",
+    "Larry@stirmgroup.com",
+]
 
 # Environment variables (set in Render -> Environment)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -103,23 +107,22 @@ async def submit(
     transaction_type: str = Form(...),
     contact_email: str = Form(...),
     short_description: str = Form(""),
-    client_name: str = Form(""),  # ✅ NEW: optional client/person name from your HTML
-    # IMPORTANT: this exact annotation is what makes Swagger show "Choose Files"
+    client_name: str = Form(""),  # optional
     files: List[UploadFile] = File(...),
 ):
     try:
         submission_id = str(uuid.uuid4())
-
-        # ✅ NEW: normalize for display (avoid blank line noise)
         client_name_clean = (client_name or "").strip()
 
-        # Read all uploaded bytes (and keep them for attachments)
+        # Read all uploaded bytes (keep for attachments)
         raw_files: List[Tuple[str, bytes, str]] = []  # (filename, bytes, content_type)
         for f in files:
             data = await f.read()
-            raw_files.append((f.filename or "upload", data, f.content_type or "application/octet-stream"))
+            raw_files.append(
+                (f.filename or "upload", data, f.content_type or "application/octet-stream")
+            )
 
-        # Build “evidence” text and image inputs for AI
+        # Build evidence text + image inputs for AI
         combined_text_chunks = []
         image_inputs = []
 
@@ -139,7 +142,10 @@ async def submit(
                 image_inputs.append(
                     {
                         "type": "input_image",
-                        "image_url": _as_data_url(ctype_lower if ctype_lower.startswith("image/") else "image/png", data),
+                        "image_url": _as_data_url(
+                            ctype_lower if ctype_lower.startswith("image/") else "image/png",
+                            data
+                        ),
                     }
                 )
 
@@ -164,11 +170,10 @@ async def submit(
             ai_error = "OPENAI_API_KEY missing"
         else:
             try:
-                # One unified prompt that works for screenshots of emails + PDFs + forwarded text
                 prompt = f"""
 You are a fraud risk analyst. Assess the submitted transaction communication for fraud risk.
 
-Client / Person Name: {client_name_clean if client_name_clean else "(not provided)"}  # ✅ NEW
+Client / Person Name: {client_name_clean if client_name_clean else "(not provided)"}
 Transaction Type: {transaction_type}
 Description: {short_description}
 User Contact Email: {contact_email}
@@ -214,15 +219,16 @@ Return exactly:
         else:
             try:
                 attach_pairs = [(fn, data) for (fn, data, _ctype) in raw_files]
+
                 resend.Emails.send(
                     {
                         "from": "Fraud Review <onboarding@resend.dev>",
-                        "to": [ANALYST_EMAIL],
+                        "to": ANALYST_EMAILS,  # ✅ BOTH recipients
                         "subject": f"Fraud Review Submission {submission_id}",
                         "html": f"""
                             <h2>Fraud Review Submission</h2>
                             <p><b>Submission ID:</b> {submission_id}</p>
-                            <p><b>Client / Person Name:</b> {client_name_clean if client_name_clean else "(not provided)"}</p> <!-- ✅ NEW -->
+                            <p><b>Client / Person Name:</b> {client_name_clean if client_name_clean else "(not provided)"}</p>
                             <p><b>Transaction Type:</b> {transaction_type}</p>
                             <p><b>User Contact Email:</b> {contact_email}</p>
                             <p><b>Description:</b> {short_description}</p>
@@ -230,23 +236,25 @@ Return exactly:
                             <hr/>
                             <pre style="white-space:pre-wrap;">{ai_text}</pre>
                         """,
-                        "attachments": _resend_attachments([(fn, data) for fn, data in attach_pairs]),
+                        "attachments": _resend_attachments(attach_pairs),
                     }
                 )
+
                 email_sent = True
             except Exception as e:
                 email_error = str(e)
                 print("Email send error:", e)
 
+        # ✅ This is what your HTML will display as the “thank you”
         return {
             "ok": True,
             "submission_id": submission_id,
-            "message": "Submitted successfully.",
+            "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
             "email_sent": email_sent,
             "email_error": email_error,
             "ai_error": ai_error,
             "files_received": [fn for fn, _, _ in raw_files],
-            "client_name": client_name_clean,  # ✅ NEW (handy for debugging)
+            "client_name": client_name_clean,
         }
 
     except Exception as e:
