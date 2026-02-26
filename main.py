@@ -92,11 +92,15 @@ Provide:
             ai_error = "OPENAI_API_KEY missing"
         else:
             try:
-                response = client.responses.create(
-                    model="gpt-4.1-mini",
-                    input=prompt,
-                )
-                ai_text = response.output_text
+                response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {"role": "system", "content": "You are a fraud risk analyst."},
+        {"role": "user", "content": prompt}
+    ],
+)
+
+ai_text = response.choices[0].message.content
             except Exception as e:
                 ai_text = f"AI analysis failed: {str(e)}"
                 ai_error = str(e)
