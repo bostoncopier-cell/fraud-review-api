@@ -10,16 +10,17 @@ from fastapi.responses import JSONResponse
 from openai import OpenAI
 import resend
 
-# Optional: for text-based PDFs (pure python)
+# Optional PDF text extraction
 try:
-    from pypdf import PdfReader
+    from pypdf import PdfReader  # pip install pypdf
+    PDF_TEXT_EXTRACTION = True
 except Exception:
     PdfReader = None
+    PDF_TEXT_EXTRACTION = False
 
 
 app = FastAPI()
 
-# Allow calls from your WordPress page
 ALLOWED_ORIGINS = [
     "https://sales101.org",
     "https://www.sales101.org",
@@ -35,18 +36,12 @@ app.add_middleware(
 
 ANALYST_EMAIL = "bostoncopier@gmail.com"
 
-# Environment variables (set these in Render)
+# Environment variables (set in Render -> Environment)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
-# Initialize clients
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 resend.api_key = RESEND_API_KEY
-
-# Limits (keep sane for free-tier + email size limits)
-MAX_FILES = 5
-MAX_FILE_BYTES = 6 * 1024 * 1024  # 6MB each
-MAX_TEXT_CHARS = 12000
 
 
 @app.get("/health")
@@ -55,75 +50,52 @@ def health():
         "ok": True,
         "openai_configured": bool(OPENAI_API_KEY),
         "resend_configured": bool(RESEND_API_KEY),
-        "pdf_text_extraction_enabled": bool(PdfReader),
+        "pdf_text_extraction_enabled": PDF_TEXT_EXTRACTION,
     }
 
 
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("utf-8")
-
-
-def _guess_mime(filename: str, content_type: str | None) -> str:
-    if content_type:
-        return content_type
-    fn = (filename or "").lower()
-    if fn.endswith(".png"):
-        return "image/png"
-    if fn.endswith(".jpg") or fn.endswith(".jpeg"):
-        return "image/jpeg"
-    if fn.endswith(".pdf"):
-        return "application/pdf"
-    return "application/octet-stream"
-
-
-def _is_image(mime: str) -> bool:
-    return mime in ("image/png", "image/jpeg")
-
-
-def _is_pdf(mime: str) -> bool:
-    return mime == "application/pdf"
-
-
-def _extract_pdf_text(pdf_bytes: bytes) -> str:
-    """
-    Extracts text from text-based PDFs only.
-    If the PDF is scanned (image-only), this will return empty/near-empty.
-    """
-    if not PdfReader:
-        return ""
-
+def _safe_decode_text(data: bytes, limit: int = 12000) -> str:
     try:
-        import io
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        parts = []
-        for page in reader.pages[:10]:  # cap pages
-            txt = page.extract_text() or ""
-            if txt.strip():
-                parts.append(txt.strip())
-        return "\n\n".join(parts).strip()
+        return data.decode("utf-8", errors="ignore")[:limit]
     except Exception:
         return ""
 
 
-def _build_prompt(transaction_type: str, short_description: str, contact_email: str) -> str:
-    return f"""
-You are a fraud-risk analyst. Analyze the uploaded email / wire instructions / screenshots for fraud risk.
+def _extract_pdf_text(data: bytes, limit_chars: int = 20000) -> str:
+    if not (PDF_TEXT_EXTRACTION and PdfReader):
+        return ""
+    try:
+        import io
+        reader = PdfReader(io.BytesIO(data))
+        text_parts = []
+        for page in reader.pages[:10]:
+            t = page.extract_text() or ""
+            if t.strip():
+                text_parts.append(t)
+        joined = "\n\n".join(text_parts).strip()
+        return joined[:limit_chars]
+    except Exception:
+        return ""
 
-Transaction Type: {transaction_type}
-User Description: {short_description}
-User Contact Email: {contact_email}
 
-Return ONLY this structure:
+def _as_data_url(content_type: str, data: bytes) -> str:
+    b64 = base64.b64encode(data).decode("utf-8")
+    return f"data:{content_type};base64,{b64}"
 
-Risk Level: Low | Moderate | High
-Key Findings:
-- bullet
-- bullet
-Short Assessment: 2-5 sentences
-Recommendation: 2-5 bullets
 
-Be specific about red flags (urgency, sender spoofing, payment method, domain mismatch, changed wire instructions, odd phrasing, attachments, request to bypass procedure, etc.).
-""".strip()
+def _resend_attachments(files: List[Tuple[str, bytes]]) -> list:
+    """
+    Resend expects attachments: [{"filename": "...", "content": "<base64>"}]
+    """
+    out = []
+    for filename, data in files:
+        out.append(
+            {
+                "filename": filename,
+                "content": base64.b64encode(data).decode("utf-8"),
+            }
+        )
+    return out
 
 
 @app.post("/api/submit")
@@ -131,43 +103,54 @@ async def submit(
     transaction_type: str = Form(...),
     contact_email: str = Form(...),
     short_description: str = Form(""),
+    # IMPORTANT: this exact annotation is what makes Swagger show "Choose Files"
     files: List[UploadFile] = File(...),
 ):
     try:
         submission_id = str(uuid.uuid4())
 
-        if not files or len(files) == 0:
-            return JSONResponse(status_code=400, content={"ok": False, "error": "No files uploaded."})
-
-        if len(files) > MAX_FILES:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": f"Too many files. Max allowed is {MAX_FILES}."},
-            )
-
-        # Read & validate files
-        uploaded: List[Tuple[str, str, bytes]] = []  # (filename, mime, bytes)
+        # Read all uploaded bytes (and keep them for attachments)
+        raw_files: List[Tuple[str, bytes, str]] = []  # (filename, bytes, content_type)
         for f in files:
             data = await f.read()
-            if not data:
-                continue
+            raw_files.append((f.filename or "upload", data, f.content_type or "application/octet-stream"))
 
-            if len(data) > MAX_FILE_BYTES:
-                return JSONResponse(
-                    status_code=400,
-                    content={"ok": False, "error": f"File too large: {f.filename}. Max is {MAX_FILE_BYTES} bytes."},
+        # Build “evidence” text and image inputs for AI
+        combined_text_chunks = []
+        image_inputs = []
+
+        for filename, data, ctype in raw_files:
+            ctype_lower = (ctype or "").lower()
+
+            # PDFs: try text extraction
+            if "pdf" in ctype_lower or filename.lower().endswith(".pdf"):
+                pdf_text = _extract_pdf_text(data)
+                if pdf_text.strip():
+                    combined_text_chunks.append(f"--- PDF TEXT ({filename}) ---\n{pdf_text}\n")
+                else:
+                    combined_text_chunks.append(f"--- PDF ({filename}) ---\n(Unable to extract text reliably)\n")
+
+            # Images: send to vision model
+            elif ctype_lower.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                image_inputs.append(
+                    {
+                        "type": "input_image",
+                        "image_url": _as_data_url(ctype_lower if ctype_lower.startswith("image/") else "image/png", data),
+                    }
                 )
 
-            mime = _guess_mime(f.filename, f.content_type)
-            uploaded.append((f.filename or "upload", mime, data))
+            # Email files / other text-like
+            else:
+                text = _safe_decode_text(data)
+                if text.strip():
+                    combined_text_chunks.append(f"--- TEXT ({filename}) ---\n{text}\n")
+                else:
+                    combined_text_chunks.append(f"--- FILE ({filename}) ---\n(Binary or unreadable as text)\n")
 
-        if not uploaded:
-            return JSONResponse(status_code=400, content={"ok": False, "error": "Uploaded files were empty."})
-
-        prompt = _build_prompt(transaction_type, short_description, contact_email)
+        combined_text = "\n\n".join(combined_text_chunks).strip()
 
         # -------------------------
-        # AI analysis (images via vision; PDFs via text-extract)
+        # AI analysis (Vision + Text)
         # -------------------------
         ai_text = ""
         ai_error = None
@@ -177,80 +160,55 @@ async def submit(
             ai_error = "OPENAI_API_KEY missing"
         else:
             try:
-                # Build one message with text + (optional) multiple images
-                content_parts = [{"type": "text", "text": prompt}]
+                # One unified prompt that works for screenshots of emails + PDFs + forwarded text
+                prompt = f"""
+You are a fraud risk analyst. Assess the submitted transaction communication for fraud risk.
 
-                # Accumulate extracted text from text-based files
-                extracted_text_blocks = []
+Transaction Type: {transaction_type}
+Description: {short_description}
+User Contact Email: {contact_email}
 
-                for (filename, mime, data) in uploaded:
-                    if _is_image(mime):
-                        data_url = f"data:{mime};base64,{_b64(data)}"
-                        content_parts.append(
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        )
-                    elif _is_pdf(mime):
-                        pdf_text = _extract_pdf_text(data)
-                        if pdf_text:
-                            extracted_text_blocks.append(
-                                f"--- PDF TEXT EXTRACT ({filename}) ---\n{pdf_text}"
-                            )
-                        else:
-                            extracted_text_blocks.append(
-                                f"--- PDF NOTE ({filename}) ---\n"
-                                f"This PDF appears to have no extractable text (likely scanned/image-only). "
-                                f"For best results, upload a screenshot image (JPG/PNG) of the email/wire instructions."
-                            )
-                    else:
-                        # Try a best-effort decode for .eml/.msg/.txt-like uploads
-                        try:
-                            text = data.decode("utf-8", errors="ignore").strip()
-                            if text:
-                                extracted_text_blocks.append(f"--- FILE TEXT ({filename}) ---\n{text[:MAX_TEXT_CHARS]}")
-                        except Exception:
-                            pass
+If there are images, they may be screenshots of emails or wire instructions—read them carefully.
+If there is extracted text (PDF/email), use it too.
 
-                if extracted_text_blocks:
-                    content_parts.append(
-                        {"type": "text", "text": "\n\n".join(extracted_text_blocks)[:MAX_TEXT_CHARS]}
+Return exactly:
+1) Risk Level: Low / Moderate / High
+2) Key Findings (bullets)
+3) Short Assessment (2-4 sentences)
+4) Recommendation (bullets)
+"""
+
+                content = [{"type": "input_text", "text": prompt}]
+                if combined_text:
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": f"\n\nExtracted / forwarded text:\n{combined_text}",
+                        }
                     )
+                if image_inputs:
+                    content.extend(image_inputs)
 
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a careful, professional fraud risk analyst."},
-                        {"role": "user", "content": content_parts},
-                    ],
+                resp = client.responses.create(
+                    model="gpt-4.1-mini",
+                    input=[{"role": "user", "content": content}],
                 )
-
-                ai_text = (response.choices[0].message.content or "").strip()
-                if not ai_text:
-                    ai_text = "AI returned an empty analysis."
+                ai_text = resp.output_text.strip() if getattr(resp, "output_text", None) else "(No AI output)"
             except Exception as e:
                 ai_text = f"AI analysis failed: {str(e)}"
                 ai_error = str(e)
 
         # -------------------------
-        # Email analyst + attach originals
+        # Email analyst (include attachments)
         # -------------------------
         email_sent = False
         email_error = None
-
-        attachments = []
-        for (filename, mime, data) in uploaded:
-            # Resend attachments want base64 content (most libs accept "content" base64)
-            attachments.append(
-                {
-                    "filename": filename,
-                    "content": _b64(data),
-                    "content_type": mime,
-                }
-            )
 
         if not RESEND_API_KEY:
             email_error = "RESEND_API_KEY missing"
         else:
             try:
+                attach_pairs = [(fn, data) for (fn, data, _ctype) in raw_files]
                 resend.Emails.send(
                     {
                         "from": "Fraud Review <onboarding@resend.dev>",
@@ -262,11 +220,11 @@ async def submit(
                             <p><b>Transaction Type:</b> {transaction_type}</p>
                             <p><b>User Contact Email:</b> {contact_email}</p>
                             <p><b>Description:</b> {short_description}</p>
-                            <p><b>Files:</b> {", ".join([u[0] for u in uploaded])}</p>
+                            <p><b>Files attached:</b> {", ".join([fn for fn,_,_ in raw_files])}</p>
                             <hr/>
-                            <pre style="white-space:pre-wrap;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{ai_text}</pre>
+                            <pre style="white-space:pre-wrap;">{ai_text}</pre>
                         """,
-                        "attachments": attachments,
+                        "attachments": _resend_attachments([(fn, data) for fn, data in attach_pairs]),
                     }
                 )
                 email_sent = True
@@ -281,6 +239,7 @@ async def submit(
             "email_sent": email_sent,
             "email_error": email_error,
             "ai_error": ai_error,
+            "files_received": [fn for fn, _, _ in raw_files],
         }
 
     except Exception as e:
