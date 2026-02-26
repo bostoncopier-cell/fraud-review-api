@@ -91,16 +91,17 @@ Provide:
             ai_text = "AI analysis not run: OPENAI_API_KEY is not configured."
             ai_error = "OPENAI_API_KEY missing"
         else:
+            # ✅ FIXED INDENTATION + SAFE TRY/EXCEPT
             try:
                 response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {"role": "system", "content": "You are a fraud risk analyst."},
-        {"role": "user", "content": prompt}
-    ],
-)
-
-ai_text = response.choices[0].message.content
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a fraud risk analyst."},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                ai_text = response.choices[0].message.content
+                ai_error = None
             except Exception as e:
                 ai_text = f"AI analysis failed: {str(e)}"
                 ai_error = str(e)
