@@ -22,6 +22,8 @@ except Exception:
 app = FastAPI()
 
 ALLOWED_ORIGINS = [
+    "https://fraudreview-portal.vercel.app",  # ✅ ADD THIS
+    "http://localhost:3000",                  # (for local testing)
     "https://sales101.org",
     "https://www.sales101.org",
 ]
