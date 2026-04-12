@@ -301,7 +301,8 @@ async def inbound_email(request: Request):
         print("❌ Supabase error:", e)
 
     return {"status": "ok"}
-    @app.post("/api/submissions/{submission_id}/delete")
+
+@app.post("/api/submissions/{submission_id}/delete")
 async def soft_delete_submission(submission_id: str):
     try:
         if not supabase:
