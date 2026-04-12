@@ -304,8 +304,36 @@ async def inbound_email(request: Request):
     from datetime import datetime, timezone
 from fastapi.responses import RedirectResponse
 
+from fastapi.responses import RedirectResponse
+
 @app.post("/api/submissions/{submission_id}/delete")
 async def soft_delete_submission(submission_id: str):
+    try:
+        if not supabase:
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "Supabase not configured"},
+            )
+
+        deleted_at = datetime.utcnow().isoformat()
+
+        result = (
+            supabase.table("submissions")
+            .update({"deleted_at": deleted_at})
+            .eq("id", submission_id)
+            .execute()
+        )
+
+        print("DELETE RESULT:", result)
+
+        return RedirectResponse(url="/admin", status_code=303)
+
+    except Exception as e:
+        print("DELETE ERROR:", str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e)},
+        )
     try:
         if not supabase:
             return JSONResponse(
