@@ -42,8 +42,8 @@ ANALYST_EMAIL = "bostoncopier@gmail.com"
 # Environment variables (set in Render -> Environment)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_URL = os.environ.get("https://rgmtfocdyuzestdsxjzx.supabase.co")
+SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJnbXRmb2NkeXV6ZXN0ZHN4anp4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTMzMDQ2OCwiZXhwIjoyMDkwOTA2NDY4fQ.wZZ2S2q8HbkzaUFjoFN4GMOH3ItZoxm14aSKOi01m1A")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
