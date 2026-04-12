@@ -263,6 +263,17 @@ async def inbound_email(request: Request):
     body = await request.json()
 
     print("🔥 INBOUND EMAIL RECEIVED")
-    print(body)
+
+    email_from = body.get("from")
+    subject = body.get("subject")
+    text = body.get("text")
+    attachments = body.get("attachments", [])
+
+    print("FROM:", email_from)
+    print("SUBJECT:", subject)
+
+    # TODO: Save to Supabase
+    # TODO: Store attachments
+    # TODO: Create submission record
 
     return {"status": "ok"}
