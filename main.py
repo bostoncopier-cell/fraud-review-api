@@ -300,7 +300,7 @@ async def inbound_email(request: Request):
     except Exception as e:
         print("❌ Supabase error:", e)
 
-    return {"status": "ok"}
+return {"status": "ok"}
 
 @app.post("/api/submissions/{submission_id}/delete")
 async def soft_delete_submission(submission_id: str):
