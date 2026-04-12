@@ -268,17 +268,33 @@ async def inbound_email(request: Request):
     body = await request.json()
 
     print("🔥 INBOUND EMAIL RECEIVED")
+    print(body)
 
-    email_from = body.get("from")
-    subject = body.get("subject")
-    text = body.get("text")
-    attachments = body.get("attachments", [])
+    data = body.get("data", {})
 
-    print("FROM:", email_from)
-    print("SUBJECT:", subject)
+    email_from = data.get("from", "")
+    subject = data.get("subject", "")
+    text = data.get("text", "")
+    attachments = data.get("attachments", [])
 
-    # TODO: Save to Supabase
-    # TODO: Store attachments
-    # TODO: Create submission record
+    attachment_count = len(attachments)
+    has_attachments = attachment_count > 0
+
+    submission = {
+        "source": "email",
+        "contact_email": email_from,
+        "email_from": email_from,
+        "email_subject": subject,
+        "email_body": text,
+        "attachment_count": attachment_count,
+        "has_attachments": has_attachments,
+        "raw_email_json": data
+    }
+
+    try:
+        supabase.table("submissions").insert(submission).execute()
+        print("✅ Saved to Supabase")
+    except Exception as e:
+        print("❌ Supabase error:", e)
 
     return {"status": "ok"}
