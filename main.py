@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from openai import OpenAI
 import resend
-
+from supabase import create_client
 # Optional PDF text extraction
 try:
     from pypdf import PdfReader  # pip install pypdf
@@ -42,6 +42,11 @@ ANALYST_EMAIL = "bostoncopier@gmail.com"
 # Environment variables (set in Render -> Environment)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 resend.api_key = RESEND_API_KEY
