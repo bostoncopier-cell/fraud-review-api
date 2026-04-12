@@ -322,9 +322,9 @@ async def soft_delete_submission(submission_id: str):
         print("DELETE RESULT:", result)
 
         return RedirectResponse(
-    url="https://fraudreview-portal.vercel.app/admin",
-    status_code=303,
-)
+            url="https://fraudreview-portal.vercel.app/admin",
+            status_code=303,
+        )
 
     except Exception as e:
         print("DELETE ERROR:", str(e))
