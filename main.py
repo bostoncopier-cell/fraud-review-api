@@ -258,3 +258,11 @@ Return exactly:
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+@app.post("/api/inbound/resend")
+async def inbound_email(request: Request):
+    body = await request.json()
+
+    print("🔥 INBOUND EMAIL RECEIVED")
+    print(body)
+
+    return {"status": "ok"}
