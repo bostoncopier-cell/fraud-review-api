@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 from typing import List, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.middleware.cors import CORSMiddlewareF
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from openai import OpenAI
 import resend
 from supabase import create_client
+
 # Optional PDF text extraction
 try:
     from pypdf import PdfReader  # pip install pypdf
@@ -23,8 +24,8 @@ except Exception:
 app = FastAPI()
 
 ALLOWED_ORIGINS = [
-    "https://fraudreview-portal.vercel.app",  # ✅ ADD THIS
-    "http://localhost:3000",                  # (for local testing)
+    "https://fraudreview-portal.vercel.app",
+    "http://localhost:3000",
     "https://sales101.org",
     "https://www.sales101.org",
 ]
@@ -37,10 +38,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Send submissions to ONE recipient (demo-safe)
+# Send submissions to one recipient
 ANALYST_EMAIL = "bostoncopier@gmail.com"
 
-# Environment variables (set in Render -> Environment)
+# Environment variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -49,7 +50,6 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 resend.api_key = RESEND_API_KEY
@@ -62,6 +62,7 @@ def health():
         "openai_configured": bool(OPENAI_API_KEY),
         "resend_configured": bool(RESEND_API_KEY),
         "pdf_text_extraction_enabled": PDF_TEXT_EXTRACTION,
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
     }
 
 
@@ -77,6 +78,7 @@ def _extract_pdf_text(data: bytes, limit_chars: int = 20000) -> str:
         return ""
     try:
         import io
+
         reader = PdfReader(io.BytesIO(data))
         text_parts = []
         for page in reader.pages[:10]:
@@ -96,7 +98,8 @@ def _as_data_url(content_type: str, data: bytes) -> str:
 
 def _resend_attachments(files: List[Tuple[str, bytes]]) -> list:
     """
-    Resend expects attachments: [{"filename": "...", "content": "<base64>"}]
+    Resend expects attachments:
+    [{"filename": "...", "content": "<base64>"}]
     """
     out = []
     for filename, data in files:
@@ -114,61 +117,69 @@ async def submit(
     transaction_type: str = Form(...),
     contact_email: str = Form(...),
     short_description: str = Form(""),
-    client_name: str = Form(""),  # optional
+    client_name: str = Form(""),
     files: List[UploadFile] = File(...),
 ):
     try:
         submission_id = str(uuid.uuid4())
         client_name_clean = (client_name or "").strip()
 
-        # Read all uploaded bytes (keep for attachments)
-        raw_files: List[Tuple[str, bytes, str]] = []  # (filename, bytes, content_type)
+        raw_files: List[Tuple[str, bytes, str]] = []
         for f in files:
             data = await f.read()
             raw_files.append(
-                (f.filename or "upload", data, f.content_type or "application/octet-stream")
+                (
+                    f.filename or "upload",
+                    data,
+                    f.content_type or "application/octet-stream",
+                )
             )
 
-        # Build evidence text + image inputs for AI
         combined_text_chunks = []
         image_inputs = []
 
         for filename, data, ctype in raw_files:
             ctype_lower = (ctype or "").lower()
 
-            # PDFs: try text extraction
             if "pdf" in ctype_lower or filename.lower().endswith(".pdf"):
                 pdf_text = _extract_pdf_text(data)
                 if pdf_text.strip():
-                    combined_text_chunks.append(f"--- PDF TEXT ({filename}) ---\n{pdf_text}\n")
+                    combined_text_chunks.append(
+                        f"--- PDF TEXT ({filename}) ---\n{pdf_text}\n"
+                    )
                 else:
-                    combined_text_chunks.append(f"--- PDF ({filename}) ---\n(Unable to extract text reliably)\n")
+                    combined_text_chunks.append(
+                        f"--- PDF ({filename}) ---\n(Unable to extract text reliably)\n"
+                    )
 
-            # Images: send to vision model
-            elif ctype_lower.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            elif ctype_lower.startswith("image/") or filename.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".webp")
+            ):
                 image_inputs.append(
                     {
                         "type": "input_image",
                         "image_url": _as_data_url(
-                            ctype_lower if ctype_lower.startswith("image/") else "image/png",
-                            data
+                            ctype_lower
+                            if ctype_lower.startswith("image/")
+                            else "image/png",
+                            data,
                         ),
                     }
                 )
 
-            # Email files / other text-like
             else:
                 text = _safe_decode_text(data)
                 if text.strip():
-                    combined_text_chunks.append(f"--- TEXT ({filename}) ---\n{text}\n")
+                    combined_text_chunks.append(
+                        f"--- TEXT ({filename}) ---\n{text}\n"
+                    )
                 else:
-                    combined_text_chunks.append(f"--- FILE ({filename}) ---\n(Binary or unreadable as text)\n")
+                    combined_text_chunks.append(
+                        f"--- FILE ({filename}) ---\n(Binary or unreadable as text)\n"
+                    )
 
         combined_text = "\n\n".join(combined_text_chunks).strip()
 
-        # -------------------------
-        # AI analysis (Vision + Text)
-        # -------------------------
         ai_text = ""
         ai_error = None
 
@@ -210,14 +221,15 @@ Return exactly:
                     model="gpt-4.1-mini",
                     input=[{"role": "user", "content": content}],
                 )
-                ai_text = resp.output_text.strip() if getattr(resp, "output_text", None) else "(No AI output)"
+                ai_text = (
+                    resp.output_text.strip()
+                    if getattr(resp, "output_text", None)
+                    else "(No AI output)"
+                )
             except Exception as e:
                 ai_text = f"AI analysis failed: {str(e)}"
                 ai_error = str(e)
 
-        # -------------------------
-        # Email analyst (include attachments)
-        # -------------------------
         email_sent = False
         email_error = None
 
@@ -230,7 +242,7 @@ Return exactly:
                 resend.Emails.send(
                     {
                         "from": "Fraud Review <onboarding@resend.dev>",
-                        "to": [ANALYST_EMAIL],  # ✅ only bostoncopier@gmail.com
+                        "to": [ANALYST_EMAIL],
                         "subject": f"Fraud Review Submission {submission_id}",
                         "html": f"""
                             <h2>Fraud Review Submission</h2>
@@ -239,7 +251,7 @@ Return exactly:
                             <p><b>Transaction Type:</b> {transaction_type}</p>
                             <p><b>User Contact Email:</b> {contact_email}</p>
                             <p><b>Description:</b> {short_description}</p>
-                            <p><b>Files attached:</b> {", ".join([fn for fn,_,_ in raw_files])}</p>
+                            <p><b>Files attached:</b> {", ".join([fn for fn, _, _ in raw_files])}</p>
                             <hr/>
                             <pre style="white-space:pre-wrap;">{ai_text}</pre>
                         """,
@@ -252,7 +264,6 @@ Return exactly:
                 email_error = str(e)
                 print("Email send error:", e)
 
-        # ✅ This is what your HTML/JS can show as the “thank you”
         return {
             "ok": True,
             "submission_id": submission_id,
@@ -266,6 +277,8 @@ Return exactly:
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
 @app.post("/api/inbound/resend")
 async def inbound_email(request: Request):
     body = await request.json()
@@ -291,16 +304,20 @@ async def inbound_email(request: Request):
         "email_body": text,
         "attachment_count": attachment_count,
         "has_attachments": has_attachments,
-        "raw_email_json": data
+        "raw_email_json": data,
     }
 
     try:
-        supabase.table("submissions").insert(submission).execute()
-        print("✅ Saved to Supabase")
+        if not supabase:
+            print("❌ Supabase not configured")
+        else:
+            supabase.table("submissions").insert(submission).execute()
+            print("✅ Saved to Supabase")
     except Exception as e:
         print("❌ Supabase error:", e)
 
-return {"status": "ok"}
+    return {"status": "ok"}
+
 
 @app.post("/api/submissions/{submission_id}/delete")
 async def soft_delete_submission(submission_id: str):
