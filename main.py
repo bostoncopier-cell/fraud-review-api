@@ -347,3 +347,30 @@ async def soft_delete_submission(submission_id: str):
             status_code=500,
             content={"ok": False, "error": str(e)},
         )
+     
+@app.post("/api/submissions/{submission_id}/restore")
+async def restore_submission(submission_id: str):
+    try:
+        if not supabase:
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "Supabase not configured"},
+            )
+
+        result = (
+            supabase.table("submissions")
+            .update({"deleted_at": None})
+            .eq("id", submission_id)
+            .execute()
+        )
+
+        print("RESTORE RESULT:", result)
+
+        return {"ok": True, "message": "Submission restored to active view"}
+
+    except Exception as e:
+        print("RESTORE ERROR:", str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(e)},
+        )
