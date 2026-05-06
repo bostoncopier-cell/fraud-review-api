@@ -265,15 +265,29 @@ Return exactly:
                 print("Email send error:", e)
 
         return {
-            "ok": True,
-            "submission_id": submission_id,
-            "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
-            "email_sent": email_sent,
-            "email_error": email_error,
-            "ai_error": ai_error,
-            "files_received": [fn for fn, _, _ in raw_files],
-            "client_name": client_name_clean,
-        }
+    "ok": True,
+    "submission_id": submission_id,
+    "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
+    "email_sent": email_sent,
+    "email_error": email_error,
+    "ai_error": ai_error,
+    "files_received": [fn for fn, _, _ in raw_files],
+    "client_name": client_name_clean,
+
+    # NEW
+    "ai_result": {
+        "risk_level": "High" if "High" in ai_text else (
+            "Moderate" if "Moderate" in ai_text else "Low"
+        ),
+        "summary": ai_text,
+        "reasoning_summary": ai_text,
+        "signals_detected": [],
+        "recommended_human_actions": [],
+        "requires_escalation": (
+            "High" in ai_text or "escalate" in ai_text.lower()
+        ),
+    },
+}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
