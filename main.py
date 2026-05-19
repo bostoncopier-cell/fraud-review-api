@@ -151,7 +151,7 @@ async def _update_submission_with_ai_result(
                 supabase.table("submissions")
                 .update(
                     {
-                        "status": "pending",
+                        "status": "awaiting_human_review",
                         "ai_result_json": ai_result,
                     }
                 )
