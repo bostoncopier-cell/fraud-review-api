@@ -1,3 +1,5 @@
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 import os
 import uuid
 import base64
