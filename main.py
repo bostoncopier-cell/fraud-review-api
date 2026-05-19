@@ -1,6 +1,7 @@
 import os
 import uuid
 import base64
+import asyncio
 import sentry_sdk
 
 from datetime import datetime
@@ -8,7 +9,7 @@ from typing import List, Tuple
 
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -19,15 +20,12 @@ from supabase import create_client
 
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
-    integrations=[
-        FastApiIntegration(),
-    ],
+    integrations=[FastApiIntegration()],
     traces_sample_rate=1.0,
     send_default_pii=False,
 )
 
 
-# Optional PDF text extraction
 try:
     from pypdf import PdfReader
     PDF_TEXT_EXTRACTION = True
@@ -44,8 +42,6 @@ ALLOWED_ORIGINS = [
     "https://fraudreview-portal.vercel.app",
     "https://fraudreview-portal-4-16.vercel.app",
     "http://localhost:3000",
-    "https://sales101.org",
-    "https://www.sales101.org",
 ]
 
 app.add_middleware(
@@ -93,18 +89,22 @@ def _safe_decode_text(data: bytes, limit: int = 12000) -> str:
 def _extract_pdf_text(data: bytes, limit_chars: int = 20000) -> str:
     if not (PDF_TEXT_EXTRACTION and PdfReader):
         return ""
+
     try:
         import io
 
         reader = PdfReader(io.BytesIO(data))
         text_parts = []
+
         for page in reader.pages[:10]:
-            t = page.extract_text() or ""
-            if t.strip():
-                text_parts.append(t)
-        joined = "\n\n".join(text_parts).strip()
-        return joined[:limit_chars]
-    except Exception:
+            text = page.extract_text() or ""
+            if text.strip():
+                text_parts.append(text)
+
+        return "\n\n".join(text_parts).strip()[:limit_chars]
+
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
         return ""
 
 
@@ -114,40 +114,75 @@ def _as_data_url(content_type: str, data: bytes) -> str:
 
 
 def _resend_attachments(files: List[Tuple[str, bytes]]) -> list:
-    out = []
-    for filename, data in files:
-        out.append(
-            {
-                "filename": filename,
-                "content": base64.b64encode(data).decode("utf-8"),
-            }
-        )
-    return out
+    return [
+        {
+            "filename": filename,
+            "content": base64.b64encode(data).decode("utf-8"),
+        }
+        for filename, data in files
+    ]
 
 
-@app.post("/api/submit")
-async def submit(
-    transaction_type: str = Form(...),
-    contact_email: str = Form(...),
-    short_description: str = Form(""),
-    client_name: str = Form(""),
-    files: List[UploadFile] = File(...),
+def _build_ai_result(ai_text: str, ai_error: str | None = None) -> dict:
+    return {
+        "risk_level": "High"
+        if "High" in ai_text
+        else ("Moderate" if "Moderate" in ai_text else "Low"),
+        "summary": ai_text,
+        "reasoning_summary": ai_text,
+        "signals_detected": [],
+        "recommended_human_actions": [],
+        "requires_escalation": "High" in ai_text or "escalate" in ai_text.lower(),
+        "ai_error": ai_error,
+    }
+
+
+async def _update_submission_with_ai_result(
+    submission_id: str,
+    ai_result: dict,
 ):
-    try:
-        submission_id = str(uuid.uuid4())
-        client_name_clean = (client_name or "").strip()
+    if not supabase:
+        print("❌ Supabase not configured; cannot update background AI result")
+        return
 
-        raw_files: List[Tuple[str, bytes, str]] = []
-        for f in files:
-            data = await f.read()
-            raw_files.append(
-                (
-                    f.filename or "upload",
-                    data,
-                    f.content_type or "application/octet-stream",
+    for attempt in range(5):
+        try:
+            result = (
+                supabase.table("submissions")
+                .update(
+                    {
+                        "status": "awaiting_human_review",
+                        "ai_result_json": ai_result,
+                    }
                 )
+                .eq("reference_id", submission_id)
+                .execute()
             )
 
+            if getattr(result, "data", None):
+                print(f"✅ Background AI result saved for {submission_id}")
+                return
+
+            print(f"⏳ Submission not found yet. Retry {attempt + 1}/5")
+
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            print("❌ Supabase background update error:", e)
+
+        await asyncio.sleep(1)
+
+    print(f"⚠️ Background AI result could not be matched to {submission_id}")
+
+
+async def process_submission_background(
+    submission_id: str,
+    transaction_type: str,
+    contact_email: str,
+    short_description: str,
+    client_name_clean: str,
+    raw_files: List[Tuple[str, bytes, str]],
+):
+    try:
         combined_text_chunks = []
         image_inputs = []
 
@@ -156,6 +191,7 @@ async def submit(
 
             if "pdf" in ctype_lower or filename.lower().endswith(".pdf"):
                 pdf_text = _extract_pdf_text(data)
+
                 if pdf_text.strip():
                     combined_text_chunks.append(
                         f"--- PDF TEXT ({filename}) ---\n{pdf_text}\n"
@@ -182,6 +218,7 @@ async def submit(
 
             else:
                 text = _safe_decode_text(data)
+
                 if text.strip():
                     combined_text_chunks.append(
                         f"--- TEXT ({filename}) ---\n{text}\n"
@@ -199,6 +236,7 @@ async def submit(
         if not client:
             ai_text = "AI analysis not run: OPENAI_API_KEY is not configured."
             ai_error = "OPENAI_API_KEY missing"
+
         else:
             try:
                 prompt = f"""
@@ -210,7 +248,7 @@ Description: {short_description}
 User Contact Email: {contact_email}
 
 If there are images, they may be screenshots of emails or wire instructions—read them carefully.
-If there is extracted text (PDF/email), use it too.
+If there is extracted text from a PDF, email, or document, use it too.
 
 Return exactly:
 1) Risk Level: Low / Moderate / High
@@ -232,14 +270,14 @@ Return exactly:
                 if image_inputs:
                     content.extend(image_inputs)
 
-                resp = client.responses.create(
+                response = client.responses.create(
                     model="gpt-4.1-mini",
                     input=[{"role": "user", "content": content}],
                 )
 
                 ai_text = (
-                    resp.output_text.strip()
-                    if getattr(resp, "output_text", None)
+                    response.output_text.strip()
+                    if getattr(response, "output_text", None)
                     else "(No AI output)"
                 )
 
@@ -248,14 +286,16 @@ Return exactly:
                 ai_text = "AI analysis failed."
                 ai_error = str(e)
 
-        email_sent = False
-        email_error = None
+        ai_result = _build_ai_result(ai_text=ai_text, ai_error=ai_error)
 
-        if not RESEND_API_KEY:
-            email_error = "RESEND_API_KEY missing"
-        else:
+        await _update_submission_with_ai_result(
+            submission_id=submission_id,
+            ai_result=ai_result,
+        )
+
+        if RESEND_API_KEY:
             try:
-                attach_pairs = [(fn, data) for (fn, data, _ctype) in raw_files]
+                attach_pairs = [(filename, data) for filename, data, _ctype in raw_files]
 
                 resend.Emails.send(
                     {
@@ -277,34 +317,63 @@ Return exactly:
                     }
                 )
 
-                email_sent = True
+                print(f"✅ Analyst email sent for {submission_id}")
 
             except Exception as e:
                 sentry_sdk.capture_exception(e)
-                email_error = str(e)
-                print("Email send error:", e)
+                print("❌ Email send error:", e)
+
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+        print("❌ Background processing error:", e)
+
+
+@app.post("/api/submit")
+async def submit(
+    background_tasks: BackgroundTasks,
+    transaction_type: str = Form(...),
+    contact_email: str = Form(...),
+    short_description: str = Form(""),
+    client_name: str = Form(""),
+    files: List[UploadFile] = File(...),
+):
+    try:
+        submission_id = str(uuid.uuid4())
+        client_name_clean = (client_name or "").strip()
+
+        raw_files: List[Tuple[str, bytes, str]] = []
+
+        for uploaded_file in files:
+            data = await uploaded_file.read()
+
+            raw_files.append(
+                (
+                    uploaded_file.filename or "upload",
+                    data,
+                    uploaded_file.content_type or "application/octet-stream",
+                )
+            )
+
+        background_tasks.add_task(
+            process_submission_background,
+            submission_id,
+            transaction_type,
+            contact_email,
+            short_description,
+            client_name_clean,
+            raw_files,
+        )
 
         return {
             "ok": True,
             "submission_id": submission_id,
-            "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
-            "email_sent": email_sent,
-            "email_error": email_error,
-            "ai_error": ai_error,
-            "files_received": [fn for fn, _, _ in raw_files],
+            "message": "Your submission was received and is now being prepared for fraud screening and human review.",
+            "email_sent": False,
+            "email_error": None,
+            "ai_error": None,
+            "files_received": [filename for filename, _, _ in raw_files],
             "client_name": client_name_clean,
-            "ai_result": {
-                "risk_level": "High" if "High" in ai_text else (
-                    "Moderate" if "Moderate" in ai_text else "Low"
-                ),
-                "summary": ai_text,
-                "reasoning_summary": ai_text,
-                "signals_detected": [],
-                "recommended_human_actions": [],
-                "requires_escalation": (
-                    "High" in ai_text or "escalate" in ai_text.lower()
-                ),
-            },
+            "ai_result": None,
         }
 
     except Exception as e:
