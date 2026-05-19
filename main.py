@@ -1,10 +1,12 @@
-import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
 import os
 import uuid
 import base64
-from datetime import datetime, timezone
+import sentry_sdk
+
+from datetime import datetime
 from typing import List, Tuple
+
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +16,20 @@ from openai import OpenAI
 import resend
 from supabase import create_client
 
+
+sentry_sdk.init(
+    dsn=os.environ.get("SENTRY_DSN"),
+    integrations=[
+        FastApiIntegration(),
+    ],
+    traces_sample_rate=1.0,
+    send_default_pii=False,
+)
+
+
 # Optional PDF text extraction
 try:
-    from pypdf import PdfReader  # pip install pypdf
+    from pypdf import PdfReader
     PDF_TEXT_EXTRACTION = True
 except Exception:
     PdfReader = None
@@ -26,7 +39,10 @@ except Exception:
 app = FastAPI()
 
 ALLOWED_ORIGINS = [
+    "https://fraudreview.app",
+    "https://www.fraudreview.app",
     "https://fraudreview-portal.vercel.app",
+    "https://fraudreview-portal-4-16.vercel.app",
     "http://localhost:3000",
     "https://sales101.org",
     "https://www.sales101.org",
@@ -40,10 +56,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Send submissions to one recipient
 ANALYST_EMAIL = "bostoncopier@gmail.com"
 
-# Environment variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -65,6 +79,7 @@ def health():
         "resend_configured": bool(RESEND_API_KEY),
         "pdf_text_extraction_enabled": PDF_TEXT_EXTRACTION,
         "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "sentry_configured": bool(os.environ.get("SENTRY_DSN")),
     }
 
 
@@ -99,10 +114,6 @@ def _as_data_url(content_type: str, data: bytes) -> str:
 
 
 def _resend_attachments(files: List[Tuple[str, bytes]]) -> list:
-    """
-    Resend expects attachments:
-    [{"filename": "...", "content": "<base64>"}]
-    """
     out = []
     for filename, data in files:
         out.append(
@@ -209,6 +220,7 @@ Return exactly:
 """
 
                 content = [{"type": "input_text", "text": prompt}]
+
                 if combined_text:
                     content.append(
                         {
@@ -216,6 +228,7 @@ Return exactly:
                             "text": f"\n\nExtracted / forwarded text:\n{combined_text}",
                         }
                     )
+
                 if image_inputs:
                     content.extend(image_inputs)
 
@@ -223,13 +236,16 @@ Return exactly:
                     model="gpt-4.1-mini",
                     input=[{"role": "user", "content": content}],
                 )
+
                 ai_text = (
                     resp.output_text.strip()
                     if getattr(resp, "output_text", None)
                     else "(No AI output)"
                 )
+
             except Exception as e:
-                ai_text = f"AI analysis failed: {str(e)}"
+                sentry_sdk.capture_exception(e)
+                ai_text = "AI analysis failed."
                 ai_error = str(e)
 
         email_sent = False
@@ -262,77 +278,86 @@ Return exactly:
                 )
 
                 email_sent = True
+
             except Exception as e:
+                sentry_sdk.capture_exception(e)
                 email_error = str(e)
                 print("Email send error:", e)
 
         return {
-    "ok": True,
-    "submission_id": submission_id,
-    "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
-    "email_sent": email_sent,
-    "email_error": email_error,
-    "ai_error": ai_error,
-    "files_received": [fn for fn, _, _ in raw_files],
-    "client_name": client_name_clean,
-
-    # NEW
-    "ai_result": {
-        "risk_level": "High" if "High" in ai_text else (
-            "Moderate" if "Moderate" in ai_text else "Low"
-        ),
-        "summary": ai_text,
-        "reasoning_summary": ai_text,
-        "signals_detected": [],
-        "recommended_human_actions": [],
-        "requires_escalation": (
-            "High" in ai_text or "escalate" in ai_text.lower()
-        ),
-    },
-}
+            "ok": True,
+            "submission_id": submission_id,
+            "message": "Thank you — your submission has been received. An analyst will follow up with an independent advisory opinion shortly.",
+            "email_sent": email_sent,
+            "email_error": email_error,
+            "ai_error": ai_error,
+            "files_received": [fn for fn, _, _ in raw_files],
+            "client_name": client_name_clean,
+            "ai_result": {
+                "risk_level": "High" if "High" in ai_text else (
+                    "Moderate" if "Moderate" in ai_text else "Low"
+                ),
+                "summary": ai_text,
+                "reasoning_summary": ai_text,
+                "signals_detected": [],
+                "recommended_human_actions": [],
+                "requires_escalation": (
+                    "High" in ai_text or "escalate" in ai_text.lower()
+                ),
+            },
+        }
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+        sentry_sdk.capture_exception(e)
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "Submission failed."},
+        )
 
 
 @app.post("/api/inbound/resend")
 async def inbound_email(request: Request):
-    body = await request.json()
-
-    print("🔥 INBOUND EMAIL RECEIVED")
-    print(body)
-
-    data = body.get("data", {})
-
-    email_from = data.get("from", "")
-    subject = data.get("subject", "")
-    text = data.get("text", "")
-    attachments = data.get("attachments", [])
-
-    attachment_count = len(attachments)
-    has_attachments = attachment_count > 0
-
-    submission = {
-        "source": "email",
-        "contact_email": email_from,
-        "email_from": email_from,
-        "email_subject": subject,
-        "email_body": text,
-        "attachment_count": attachment_count,
-        "has_attachments": has_attachments,
-        "raw_email_json": data,
-    }
-
     try:
+        body = await request.json()
+
+        print("🔥 INBOUND EMAIL RECEIVED")
+
+        data = body.get("data", {})
+
+        email_from = data.get("from", "")
+        subject = data.get("subject", "")
+        text = data.get("text", "")
+        attachments = data.get("attachments", [])
+
+        attachment_count = len(attachments)
+        has_attachments = attachment_count > 0
+
+        submission = {
+            "source": "email",
+            "contact_email": email_from,
+            "email_from": email_from,
+            "email_subject": subject,
+            "email_body": text,
+            "attachment_count": attachment_count,
+            "has_attachments": has_attachments,
+            "raw_email_json": data,
+        }
+
         if not supabase:
             print("❌ Supabase not configured")
         else:
             supabase.table("submissions").insert(submission).execute()
             print("✅ Saved to Supabase")
-    except Exception as e:
-        print("❌ Supabase error:", e)
 
-    return {"status": "ok"}
+        return {"status": "ok"}
+
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+        print("❌ Inbound email error:", e)
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "Inbound email processing failed."},
+        )
 
 
 @app.post("/api/submissions/{submission_id}/delete")
@@ -358,12 +383,14 @@ async def soft_delete_submission(submission_id: str):
         return {"ok": True, "message": "Submission removed from active view"}
 
     except Exception as e:
+        sentry_sdk.capture_exception(e)
         print("DELETE ERROR:", str(e))
         return JSONResponse(
             status_code=500,
-            content={"ok": False, "error": str(e)},
+            content={"ok": False, "error": "Delete failed."},
         )
-     
+
+
 @app.post("/api/submissions/{submission_id}/restore")
 async def restore_submission(submission_id: str):
     try:
@@ -385,8 +412,9 @@ async def restore_submission(submission_id: str):
         return {"ok": True, "message": "Submission restored to active view"}
 
     except Exception as e:
+        sentry_sdk.capture_exception(e)
         print("RESTORE ERROR:", str(e))
         return JSONResponse(
             status_code=500,
-            content={"ok": False, "error": str(e)},
+            content={"ok": False, "error": "Restore failed."},
         )
