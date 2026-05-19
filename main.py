@@ -3,6 +3,7 @@ import uuid
 import base64
 import asyncio
 import sentry_sdk
+import requests
 
 from datetime import datetime
 from typing import List, Tuple
@@ -28,6 +29,7 @@ sentry_sdk.init(
 
 try:
     from pypdf import PdfReader
+
     PDF_TEXT_EXTRACTION = True
 except Exception:
     PdfReader = None
@@ -381,6 +383,97 @@ async def submit(
         return JSONResponse(
             status_code=500,
             content={"ok": False, "error": "Submission failed."},
+        )
+
+
+@app.post("/api/submit-uploadthing")
+async def submit_uploadthing(
+    background_tasks: BackgroundTasks,
+    request: Request,
+):
+    try:
+        body = await request.json()
+
+        transaction_type = body.get("transaction_type", "")
+        contact_email = body.get("contact_email", "")
+        short_description = body.get("short_description", "")
+        client_name_clean = (body.get("client_name", "") or "").strip()
+
+        uploadthing_url = body.get("uploadthing_url", "")
+        uploadthing_key = body.get("uploadthing_key", "")
+        file_name = body.get("file_name", "upload")
+        file_type = body.get("file_type", "application/octet-stream")
+
+        if not transaction_type or not contact_email or not uploadthing_url:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "Missing required UploadThing fields.",
+                },
+            )
+
+        submission_id = str(uuid.uuid4())
+
+        print("⬇️ Downloading UploadThing file:", uploadthing_url)
+
+        download_response = await asyncio.to_thread(
+            lambda: requests.get(uploadthing_url, timeout=30)
+        )
+
+        if download_response.status_code != 200:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": "Failed to download UploadThing file.",
+                },
+            )
+
+        file_bytes = download_response.content
+
+        raw_files = [
+            (
+                file_name,
+                file_bytes,
+                file_type,
+            )
+        ]
+
+        background_tasks.add_task(
+            process_submission_background,
+            submission_id,
+            transaction_type,
+            contact_email,
+            short_description,
+            client_name_clean,
+            raw_files,
+        )
+
+        return {
+            "ok": True,
+            "submission_id": submission_id,
+            "message": "Your submission was received and is now being prepared for fraud screening and human review.",
+            "email_sent": False,
+            "email_error": None,
+            "ai_error": None,
+            "files_received": [file_name],
+            "uploadthing_key": uploadthing_key,
+            "client_name": client_name_clean,
+            "ai_result": None,
+        }
+
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+
+        print("❌ UploadThing submission error:", e)
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "UploadThing submission failed.",
+            },
         )
 
 
